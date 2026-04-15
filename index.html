@@ -1,484 +1,185 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { 
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area
-} from 'recharts';
-import { initializeApp } from 'firebase/app';
-import { 
-  getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged, signOut,
-  createUserWithEmailAndPassword, signInWithEmailAndPassword
-} from 'firebase/auth';
-import { 
-  getFirestore, collection, doc, setDoc, addDoc, onSnapshot, query, deleteDoc, updateDoc
-} from 'firebase/firestore';
-import { 
-  LayoutDashboard, History, PlusCircle, Package, Download, Upload, LogOut, 
-  TrendingUp, AlertCircle, ShoppingCart, ArrowUpRight, ArrowDownRight, Search
-} from 'lucide-react';
-
-// --- CONFIGURATION FIREBASE ---
-// Note : Les variables ci-dessous sont injectées par l'environnement
-const firebaseConfig = JSON.parse(__firebase_config);
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'price-tracker-2026';
-
-const App = () => {
-  const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [authMode, setAuthMode] = useState('login');
-  const [authForm, setAuthForm] = useState({ email: '', password: '' });
-  const [error, setError] = useState('');
-
-  const [view, setView] = useState('dashboard');
-  const [releves, setReleves] = useState([]);
-  const [selectedEnseigne, setSelectedEnseigne] = useState('Leclerc');
-  const [searchTerm, setSearchTerm] = useState('');
-  
-  // Formulaire de saisie
-  const [formData, setFormData] = useState({ 
-    date: new Date().toISOString().split('T')[0], 
-    enseigne: 'Leclerc', 
-    prodNom: '', 
-    prix: '' 
-  });
-
-  // --- LOGIQUE D'AUTHENTIFICATION ---
-  useEffect(() => {
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
-      } catch (err) { 
-        console.error("Erreur Auth:", err); 
-      } finally { 
-        setLoading(false); 
-      }
-    };
-    initAuth();
-    const unsubscribe = onAuthStateChanged(auth, (u) => { 
-      setUser(u); 
-      setLoading(false); 
-    });
-    return () => unsubscribe();
-  }, []);
-
-  // --- RÉCUPÉRATION DES DONNÉES ---
-  useEffect(() => {
-    if (!user) return;
-    const q = collection(db, 'artifacts', appId, 'users', user.uid, 'releves');
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setReleves(data.sort((a, b) => new Date(b.date) - new Date(a.date)));
-    }, (err) => {
-      console.error("Erreur Firestore:", err);
-    });
-    return () => unsubscribe();
-  }, [user]);
-
-  // --- CALCULS KPI (BENTO STATS) ---
-  const stats = useMemo(() => {
-    if (releves.length === 0) return { avg: 0, count: 0, evolution: 0 };
-    const latest = releves[0].prix;
-    const count = releves.length;
-    const avg = releves.reduce((acc, curr) => acc + curr.prix, 0) / count;
-    const evolution = avg !== 0 ? ((latest - avg) / avg * 100).toFixed(1) : 0;
-    return { avg, count, evolution };
-  }, [releves]);
-
-  const produitsUniques = useMemo(() => {
-    return [...new Set(releves.map(r => r.prodNom))];
-  }, [releves]);
-
-  // --- LOGIQUE DU GRAPHIQUE ---
-  const chartData = useMemo(() => {
-    const ensReleves = releves.filter(r => r.enseigne === selectedEnseigne);
-    const dates = [...new Set(ensReleves.map(r => r.date))].sort((a,b) => new Date(a) - new Date(b));
-    return dates.map(date => {
-      const point = { name: new Date(date).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short' }) };
-      produitsUniques.slice(0, 5).forEach(p => {
-        const match = ensReleves.find(r => r.prodNom === p && r.date === date);
-        point[p] = match ? match.prix : null;
-      });
-      return point;
-    });
-  }, [releves, selectedEnseigne, produitsUniques]);
-
-  // --- GESTIONNAIRES D'ÉVÉNEMENTS ---
-  const handleAuth = async (e) => {
-    e.preventDefault();
-    setError('');
-    try {
-      if (authMode === 'signup') await createUserWithEmailAndPassword(auth, authForm.email, authForm.password);
-      else await signInWithEmailAndPassword(auth, authForm.email, authForm.password);
-    } catch (err) { 
-      setError("Erreur d'accès. Vérifiez vos identifiants."); 
-    }
-  };
-
-  const handleAdd = async (e) => {
-    e.preventDefault();
-    if (!user || !formData.prix || !formData.prodNom) return;
-    try {
-      await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'releves'), {
-        ...formData,
-        prix: parseFloat(formData.prix),
-        createdAt: new Date().toISOString()
-      });
-      setFormData({ ...formData, prix: '', prodNom: '', enseigne: 'Leclerc', date: new Date().toISOString().split('T')[0] });
-      setView('dashboard');
-    } catch (err) {
-      console.error("Erreur Ajout:", err);
-    }
-  };
-
-  const deleteReleve = async (id) => {
-    if (!user) return;
-    try {
-      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'releves', id));
-    } catch (err) {
-      console.error("Erreur Suppression:", err);
-    }
-  };
-
-  if (loading) return (
-    <div className="h-screen flex items-center justify-center bg-slate-950">
-      <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-sky-500"></div>
-    </div>
-  );
-
-  // Écran de connexion
-  if (!user || (user.isAnonymous && authMode !== 'anonymous')) {
-    if (user?.isAnonymous) { /* On laisse passer si on veut un mode démo, sinon on force l'email */ }
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PriceTrack 2026 | SaaS Dashboard</title>
     
-    return (
-      <div className="min-h-screen bg-[#0a0c10] flex items-center justify-center p-6 text-white">
-        <div className="w-full max-w-md space-y-8 bg-slate-900/50 p-10 rounded-[2.5rem] border border-slate-800 backdrop-blur-xl">
-          <div className="text-center">
-            <div className="h-14 w-14 bg-sky-500 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-2xl shadow-sky-500/20">
-              <TrendingUp size={28} className="text-slate-950" />
-            </div>
-            <h1 className="text-3xl font-black tracking-tight italic">PriceTrack <span className="text-sky-500">2026</span></h1>
-            <p className="text-slate-400 text-sm mt-3 font-medium uppercase tracking-widest">SaaS Intelligence Tarifaire</p>
-          </div>
-          
-          {error && <div className="bg-rose-500/10 border border-rose-500/20 text-rose-500 p-4 rounded-2xl text-xs font-bold text-center italic">{error}</div>}
+    <!-- ÉTAPE 1 : Chargement des bibliothèques dans le bon ordre -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React & ReactDOM -->
+    <script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+    
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-          <form onSubmit={handleAuth} className="space-y-4">
-            <input 
-              type="email" placeholder="Email professionnel" required 
-              className="w-full p-4 bg-slate-800/50 border border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-sky-500/50 transition-all text-sm"
-              value={authForm.email} onChange={e => setAuthForm({...authForm, email: e.target.value})}
-            />
-            <input 
-              type="password" placeholder="Mot de passe" required 
-              className="w-full p-4 bg-slate-800/50 border border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-sky-500/50 transition-all text-sm"
-              value={authForm.password} onChange={e => setAuthForm({...authForm, password: e.target.value})}
-            />
-            <button type="submit" className="w-full py-4 bg-sky-500 hover:bg-sky-400 text-slate-950 font-black rounded-2xl transition-all shadow-lg shadow-sky-500/10 uppercase tracking-tighter">
-              {authMode === 'login' ? "Accéder à l'interface" : "Créer l'espace client"}
-            </button>
-          </form>
+    <!-- ÉTAPE CRUCIALE : PropTypes est requis par Recharts en mode UMD -->
+    <script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
+    
+    <!-- Recharts -->
+    <script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+    
+    <!-- Icônes FontAwesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
-          <button onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')} className="w-full text-center text-[10px] font-black text-slate-500 hover:text-sky-500 transition-colors uppercase tracking-widest">
-            {authMode === 'login' ? "Pas encore de compte ? S'enregistrer" : "Déjà client ? Se connecter"}
-          </button>
-        </div>
-      </div>
-    );
-  }
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap');
+        
+        body { 
+            font-family: 'Plus Jakarta Sans', sans-serif; 
+            background-color: #0a0c10; 
+            color: #f1f5f9;
+            margin: 0;
+            overflow-x: hidden;
+        }
 
-  return (
-    <div className="flex h-screen bg-[#0f1117] text-slate-200 font-sans selection:bg-sky-500/30">
-      {/* SIDEBAR BENTO STYLE */}
-      <aside className="w-72 bg-[#0a0c10] border-r border-slate-800 flex flex-col p-6">
-        <div className="flex items-center gap-3 mb-10 px-2">
-          <div className="h-10 w-10 bg-sky-500 rounded-xl flex items-center justify-center text-slate-950 shadow-lg shadow-sky-500/20">
-            <TrendingUp size={22} />
-          </div>
-          <span className="font-black text-xl tracking-tighter italic">PriceTrack</span>
-        </div>
+        .glass-card { 
+            background: rgba(15, 17, 23, 0.7); 
+            backdrop-filter: blur(12px); 
+            border: 1px solid rgba(255,255,255,0.05); 
+        }
 
-        <nav className="flex-1 space-y-2">
-          <div className="text-[10px] font-black text-slate-600 uppercase tracking-[0.2em] mb-4 ml-2">Analyse</div>
-          <NavItem active={view === 'dashboard'} icon={<LayoutDashboard size={18}/>} label="Tableau de bord" onClick={() => setView('dashboard')} />
-          <NavItem active={view === 'historique'} icon={<History size={18}/>} label="Historique" onClick={() => setView('historique')} />
-          <div className="h-4"></div>
-          <div className="text-[10px] font-black text-slate-600 uppercase tracking-[0.2em] mb-4 ml-2">Opérations</div>
-          <NavItem active={view === 'saisie'} icon={<PlusCircle size={18}/>} label="Saisie Relevé" onClick={() => setView('saisie')} />
-          <NavItem active={view === 'catalogue'} icon={<Package size={18}/>} label="Catalogue" onClick={() => setView('catalogue')} />
-        </nav>
+        .custom-gradient {
+            background: linear-gradient(135deg, #0ea5e9 0%, #6366f1 100%);
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
 
-        <div className="mt-auto pt-6 space-y-3">
-          <button className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-bold text-slate-400 hover:text-emerald-400 hover:bg-emerald-400/5 transition-all">
-            <Download size={16} /> Exporter rapports
-          </button>
-          <div className="bg-slate-900/80 rounded-2xl p-4 border border-slate-800">
-            <div className="flex items-center gap-3">
-              <div className="h-8 w-8 rounded-lg bg-gradient-to-tr from-sky-500 to-indigo-500 flex items-center justify-center text-[10px] font-black text-white">
-                {user?.email ? user.email.substring(0,2).toUpperCase() : 'AN'}
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-[10px] font-black text-slate-500 uppercase leading-none mb-1">Session Active</p>
-                <p className="text-xs font-bold truncate text-slate-200">{user?.email || 'Visiteur'}</p>
-              </div>
-              <button onClick={() => signOut(auth)} className="text-slate-500 hover:text-rose-500 transition-colors">
-                <LogOut size={16} />
-              </button>
-            </div>
-          </div>
-        </div>
-      </aside>
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+        
+        const App = () => {
+            const [view, setView] = useState('dashboard');
+            const [selectedEnseigne, setSelectedEnseigne] = useState('Leclerc');
+            const [isLibLoaded, setIsLibLoaded] = useState(false);
 
-      {/* ZONE DE CONTENU PRINCIPAL */}
-      <main className="flex-1 overflow-y-auto bg-[#0f1117] p-8">
-        <header className="flex items-center justify-between mb-10">
-          <div>
-            <h2 className="text-3xl font-black tracking-tighter text-white capitalize">{view}</h2>
-            <p className="text-slate-500 text-sm mt-1">Surveillance tarifaire en temps réel</p>
-          </div>
-          <div className="flex items-center gap-4">
-             <div className="flex bg-slate-900 rounded-2xl p-1 border border-slate-800 shadow-inner">
-               {['Leclerc', 'Carrefour', 'Auchan'].map(e => (
-                 <button 
-                  key={e} 
-                  onClick={() => setSelectedEnseigne(e)}
-                  className={`px-4 py-2 rounded-xl text-[10px] font-black transition-all uppercase tracking-widest ${selectedEnseigne === e ? 'bg-sky-500 text-slate-950 shadow-lg shadow-sky-500/20' : 'text-slate-500 hover:text-slate-300'}`}
-                 >
-                   {e}
-                 </button>
-               ))}
-             </div>
-          </div>
-        </header>
+            useEffect(() => {
+                // On vérifie la présence de Recharts dans l'objet window
+                if (window.Recharts) {
+                    setIsLibLoaded(true);
+                }
+            }, []);
 
-        {view === 'dashboard' && (
-          <div className="grid grid-cols-12 gap-6">
-            <div className="col-span-12 md:col-span-3 bg-slate-900/50 border border-slate-800 p-6 rounded-[2rem] backdrop-blur-sm relative overflow-hidden">
-              <div className="flex justify-between items-start mb-4">
-                <div className="p-3 bg-sky-500/10 text-sky-500 rounded-2xl"><ShoppingCart size={20}/></div>
-                <div className={`flex items-center gap-1 text-xs font-black px-2 py-1 rounded-lg ${parseFloat(stats.evolution) > 0 ? 'bg-rose-400/10 text-rose-400' : 'bg-emerald-400/10 text-emerald-400'}`}>
-                  {parseFloat(stats.evolution) > 0 ? <ArrowUpRight size={12}/> : <ArrowDownRight size={12}/>} {stats.evolution}%
-                </div>
-              </div>
-              <p className="text-slate-500 text-[10px] font-black uppercase tracking-widest mb-1">Index Prix Moyen</p>
-              <h3 className="text-4xl font-black text-white">{stats.avg.toFixed(2)} <span className="text-lg text-slate-500">€</span></h3>
-              <div className="absolute -right-4 -bottom-4 h-24 w-24 bg-sky-500/5 rounded-full blur-3xl"></div>
-            </div>
-
-            <div className="col-span-12 md:col-span-3 bg-slate-900/50 border border-slate-800 p-6 rounded-[2rem] backdrop-blur-sm">
-              <div className="flex justify-between items-start mb-4">
-                <div className="p-3 bg-indigo-500/10 text-indigo-500 rounded-2xl"><History size={20}/></div>
-              </div>
-              <p className="text-slate-500 text-[10px] font-black uppercase tracking-widest mb-1">Total Relevés (30j)</p>
-              <h3 className="text-4xl font-black text-white">{stats.count}</h3>
-            </div>
-
-            <div className="col-span-12 md:col-span-6 bg-slate-900/50 border border-slate-800 p-6 rounded-[2rem] backdrop-blur-sm relative overflow-hidden group">
-               <div className="relative z-10 h-full flex flex-col justify-center">
-                 <p className="text-sky-500 text-[10px] font-black uppercase tracking-widest mb-1">Alerte Décrochage</p>
-                 <h3 className="text-2xl font-black text-white max-w-[200px]">0 anomalies détectées ce jour</h3>
-               </div>
-               <div className="absolute right-0 top-0 h-full w-1/2 bg-gradient-to-l from-sky-500/5 to-transparent flex items-center justify-center">
-                 <AlertCircle size={80} className="text-sky-500/10 group-hover:scale-110 transition-transform duration-500" />
-               </div>
-            </div>
-
-            <div className="col-span-12 bg-slate-900/50 border border-slate-800 p-8 rounded-[2.5rem] backdrop-blur-sm">
-               <div className="flex items-center justify-between mb-10">
-                 <h4 className="text-xl font-black italic tracking-tighter">Évolution Dynamique <span className="text-slate-600 text-sm font-bold not-italic ml-2">— {selectedEnseigne}</span></h4>
-                 <div className="flex gap-4">
-                    <div className="flex items-center gap-2">
-                      <div className="h-2 w-2 rounded-full bg-sky-500"></div>
-                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">Top 5 Produits Monitorés</span>
+            if (!isLibLoaded) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center bg-[#0f1117]">
+                        <div className="text-sky-500 font-bold animate-pulse text-sm uppercase tracking-widest flex items-center gap-3">
+                            <i className="fa-solid fa-circle-notch animate-spin"></i> Initialisation...
+                        </div>
                     </div>
-                 </div>
-               </div>
-               
-               <div className="h-[400px] w-full">
-                  {releves.length > 0 ? (
-                    <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={chartData}>
-                        <defs>
-                          <linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#0ea5e9" stopOpacity={0.15}/>
-                            <stop offset="95%" stopColor="#0ea5e9" stopOpacity={0}/>
-                          </linearGradient>
-                          <linearGradient id="colorPrice2" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#6366f1" stopOpacity={0.15}/>
-                            <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
-                          </linearGradient>
-                        </defs>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" />
-                        <XAxis 
-                          dataKey="name" 
-                          axisLine={false} 
-                          tickLine={false} 
-                          tick={{fontSize: 10, fontWeight: 900, fill: '#475569'}} 
-                          dy={10}
-                        />
-                        <YAxis 
-                          axisLine={false} 
-                          tickLine={false} 
-                          tick={{fontSize: 10, fontWeight: 900, fill: '#475569'}} 
-                          dx={-10}
-                        />
-                        <Tooltip 
-                          contentStyle={{ backgroundColor: '#0a0c10', border: '1px solid #1e293b', borderRadius: '16px', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.5)' }}
-                          itemStyle={{ fontSize: '10px', fontWeight: 'bold' }}
-                          cursor={{ stroke: '#1e293b', strokeWidth: 2 }}
-                        />
-                        {produitsUniques.slice(0, 5).map((p, i) => (
-                          <Area 
-                            key={i} 
-                            type="monotone" 
-                            dataKey={p} 
-                            stroke={i === 0 ? '#0ea5e9' : i === 1 ? '#6366f1' : i === 2 ? '#a855f7' : '#475569'} 
-                            fillOpacity={1} 
-                            fill={i === 0 ? "url(#colorPrice)" : i === 1 ? "url(#colorPrice2)" : "transparent"} 
-                            strokeWidth={3}
-                            activeDot={{ r: 6, strokeWidth: 0, fill: '#fff' }}
-                          />
-                        ))}
-                      </AreaChart>
-                    </ResponsiveContainer>
-                  ) : (
-                    <div className="h-full flex items-center justify-center text-slate-600 italic font-medium">Aucune donnée disponible pour le graphique</div>
-                  )}
-               </div>
+                );
+            }
+
+            // Extraction sécurisée
+            const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } = window.Recharts;
+
+            const chartData = [
+                { name: 'Lun', prix: 3.82 }, { name: 'Mar', prix: 3.85 },
+                { name: 'Mer', prix: 3.75 }, { name: 'Jeu', prix: 3.92 },
+                { name: 'Ven', prix: 3.88 }, { name: 'Sam', prix: 3.84 },
+                { name: 'Dim', prix: 3.95 }
+            ];
+
+            return (
+                <div className="flex min-h-screen bg-[#0f1117]">
+                    {/* Sidebar */}
+                    <aside className="w-64 bg-[#0a0c10] border-r border-white/5 p-6 hidden lg:flex flex-col">
+                        <div className="flex items-center gap-3 mb-12">
+                            <div className="h-10 w-10 custom-gradient rounded-xl flex items-center justify-center text-slate-900 shadow-lg">
+                                <i className="fa-solid fa-chart-line"></i>
+                            </div>
+                            <span className="text-xl font-black italic tracking-tighter">PriceTrack</span>
+                        </div>
+
+                        <nav className="space-y-2 flex-1">
+                            <NavItem active={view === 'dashboard'} icon="gauge-high" label="Dashboard" onClick={() => setView('dashboard')} />
+                            <NavItem active={view === 'history'} icon="clock-rotate-left" label="Historique" onClick={() => setView('history')} />
+                            <NavItem active={view === 'saisie'} icon="plus" label="Saisie Relevé" onClick={() => setView('saisie')} />
+                        </nav>
+                        
+                        <div className="bg-white/5 p-4 rounded-2xl border border-white/5">
+                            <p className="text-[10px] font-black text-slate-500 uppercase">Statut Serveur</p>
+                            <div className="flex items-center gap-2 mt-2">
+                                <div className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></div>
+                                <span className="text-xs font-bold text-emerald-500">Connecté</span>
+                            </div>
+                        </div>
+                    </aside>
+
+                    {/* Main Content */}
+                    <main className="flex-1 p-8 lg:p-12 overflow-y-auto">
+                        <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-10">
+                            <div>
+                                <h1 className="text-3xl font-black tracking-tight text-white capitalize">{view}</h1>
+                                <p className="text-slate-500 text-sm mt-1 font-medium">Monitoring tarifaire — {selectedEnseigne}</p>
+                            </div>
+                            <div className="flex bg-slate-900 rounded-xl p-1 border border-white/5 shadow-inner">
+                                {['Leclerc', 'Carrefour', 'Auchan'].map(e => (
+                                    <button 
+                                        key={e} 
+                                        onClick={() => setSelectedEnseigne(e)}
+                                        className={`px-4 py-2 rounded-lg text-[10px] font-black transition-all uppercase tracking-widest ${selectedEnseigne === e ? 'bg-sky-500 text-slate-950' : 'text-slate-500 hover:text-slate-300'}`}
+                                    >
+                                        {e}
+                                    </button>
+                                ))}
+                            </div>
+                        </header>
+
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                            <StatCard label="Prix Moyen" value="98.45 €" icon="cart-shopping" color="sky" />
+                            <StatCard label="Positionnement" value="-1.2 %" icon="arrow-trend-down" color="emerald" />
+                            <div className="custom-gradient p-6 rounded-[2rem] text-slate-950 flex flex-col justify-between shadow-lg shadow-sky-500/10">
+                                <p className="text-[10px] font-black uppercase tracking-widest opacity-60 text-slate-900">Alertes</p>
+                                <h3 className="text-2xl font-black text-slate-900">Aucun décrochage détecté</h3>
+                            </div>
+                        </div>
+
+                        <div className="glass-card p-8 rounded-[2.5rem]">
+                            <h4 className="font-black italic tracking-tighter text-xl mb-8">Analyse de la tendance</h4>
+                            <div className="h-[350px] w-full">
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <AreaChart data={chartData}>
+                                        <defs>
+                                            <linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1">
+                                                <stop offset="5%" stopColor="#0ea5e9" stopOpacity={0.2}/>
+                                                <stop offset="95%" stopColor="#0ea5e9" stopOpacity={0}/>
+                                            </linearGradient>
+                                        </defs>
+                                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" />
+                                        <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 10, fontWeight: 900}} dy={10} />
+                                        <YAxis hide domain={['dataMin - 0.1', 'dataMax + 0.1']} />
+                                        <Tooltip contentStyle={{backgroundColor: '#0a0c10', border: '1px solid #1e293b', borderRadius: '16px', color: '#fff'}} />
+                                        <Area type="monotone" dataKey="prix" stroke="#0ea5e9" strokeWidth={4} fillOpacity={1} fill="url(#colorPrice)" />
+                                    </AreaChart>
+                                </ResponsiveContainer>
+                            </div>
+                        </div>
+                    </main>
+                </div>
+            );
+        };
+
+        const NavItem = ({ active, icon, label, onClick }) => (
+            <button onClick={onClick} className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all ${active ? 'bg-sky-500 text-slate-950 shadow-lg' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}`}>
+                <i className={`fa-solid fa-${icon}`}></i> <span>{label}</span>
+            </button>
+        );
+
+        const StatCard = ({ label, value, icon, color }) => (
+            <div className="glass-card p-6 rounded-[2rem]">
+                <div className={`p-3 bg-${color}-500/10 text-${color}-500 w-fit rounded-xl mb-4`}><i className={`fa-solid fa-${icon}`}></i></div>
+                <p className="text-slate-500 text-[10px] font-black uppercase tracking-widest mb-1">{label}</p>
+                <h3 className="text-4xl font-black text-white">{value}</h3>
             </div>
-          </div>
-        )}
+        );
 
-        {view === 'historique' && (
-          <div className="bg-slate-900/50 border border-slate-800 rounded-[2.5rem] overflow-hidden">
-             <div className="p-6 border-b border-slate-800 flex justify-between items-center">
-                <div className="relative">
-                  <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" />
-                  <input 
-                    type="text" 
-                    placeholder="Filtrer par produit..." 
-                    className="bg-slate-950 border border-slate-800 rounded-xl pl-12 pr-4 py-2 text-xs outline-none focus:ring-1 focus:ring-sky-500/50 w-64"
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                  />
-                </div>
-             </div>
-             <div className="overflow-x-auto">
-               <table className="w-full">
-                  <thead>
-                    <tr className="bg-slate-950/50 text-left">
-                      <th className="px-8 py-5 text-[10px] font-black text-slate-600 uppercase tracking-widest">Date Observation</th>
-                      <th className="px-8 py-5 text-[10px] font-black text-slate-600 uppercase tracking-widest">Désignation</th>
-                      <th className="px-8 py-5 text-[10px] font-black text-slate-600 uppercase tracking-widest">Enseigne</th>
-                      <th className="px-8 py-5 text-right text-[10px] font-black text-slate-600 uppercase tracking-widest">Prix Unitaire</th>
-                      <th className="px-8 py-5 text-center text-[10px] font-black text-slate-600 uppercase tracking-widest">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/50">
-                    {releves.filter(r => r.prodNom.toLowerCase().includes(searchTerm.toLowerCase())).map((r) => (
-                      <tr key={r.id} className="group hover:bg-sky-500/[0.02] transition-colors">
-                        <td className="px-8 py-4 text-xs font-black text-slate-500">{new Date(r.date).toLocaleDateString('fr-FR')}</td>
-                        <td className="px-8 py-4 text-sm font-bold text-slate-200">{r.prodNom}</td>
-                        <td className="px-8 py-4">
-                          <span className="text-[10px] font-black px-3 py-1 bg-slate-800 rounded-full text-slate-400 uppercase tracking-tighter">{r.enseigne}</span>
-                        </td>
-                        <td className="px-8 py-4 text-right text-sm font-black text-sky-400">{r.prix.toFixed(2)} €</td>
-                        <td className="px-8 py-4 text-center">
-                          <button onClick={() => deleteReleve(r.id)} className="p-2 text-slate-600 hover:text-rose-500 transition-colors opacity-0 group-hover:opacity-100">
-                            <LogOut size={14} className="rotate-90" />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-               </table>
-             </div>
-          </div>
-        )}
-
-        {view === 'saisie' && (
-          <div className="max-w-2xl mx-auto py-10">
-            <div className="bg-slate-900/50 border border-slate-800 p-12 rounded-[3rem] backdrop-blur-xl shadow-2xl">
-              <div className="mb-10 text-center">
-                <h3 className="text-2xl font-black italic tracking-tighter">Nouveau Relevé</h3>
-                <p className="text-slate-500 text-xs mt-2 uppercase tracking-widest font-bold">Synchronisation cloud sécurisée</p>
-              </div>
-              <form onSubmit={handleAdd} className="space-y-8">
-                <div className="grid grid-cols-2 gap-6">
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-black text-slate-500 uppercase ml-1 tracking-widest">Date de relevé</label>
-                    <input type="date" value={formData.date} onChange={e => setFormData({...formData, date: e.target.value})} className="w-full p-4 bg-slate-950 border border-slate-800 rounded-2xl outline-none focus:ring-2 focus:ring-sky-500/50 text-sm" />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-black text-slate-500 uppercase ml-1 tracking-widest">Enseigne cible</label>
-                    <select value={formData.enseigne} onChange={e => setFormData({...formData, enseigne: e.target.value})} className="w-full p-4 bg-slate-950 border border-slate-800 rounded-2xl outline-none focus:ring-2 focus:ring-sky-500/50 text-sm appearance-none">
-                      <option>Leclerc</option><option>Carrefour</option><option>Auchan</option>
-                    </select>
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black text-slate-500 uppercase ml-1 tracking-widest">Nom du produit</label>
-                  <input type="text" placeholder="Ex: Nutella 400g" required value={formData.prodNom} onChange={e => setFormData({...formData, prodNom: e.target.value})} className="w-full p-4 bg-slate-950 border border-slate-800 rounded-2xl outline-none focus:ring-2 focus:ring-sky-500/50 text-sm" />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black text-slate-500 uppercase ml-1 tracking-widest">Prix relevé (€)</label>
-                  <div className="relative">
-                    <input type="number" step="0.01" required placeholder="0.00" value={formData.prix} onChange={e => setFormData({...formData, prix: e.target.value})} className="w-full p-8 bg-slate-950 border border-slate-800 rounded-[2rem] text-5xl font-black text-sky-500 outline-none focus:ring-2 focus:ring-sky-500/50 placeholder:text-slate-800" />
-                    <span className="absolute right-8 top-1/2 -translate-y-1/2 text-2xl font-black text-slate-700 italic">EUR</span>
-                  </div>
-                </div>
-                <button type="submit" className="w-full py-5 bg-sky-500 hover:bg-sky-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-sky-500/10 transition-all uppercase tracking-widest text-xs">Valider le relevé</button>
-              </form>
-            </div>
-          </div>
-        )}
-
-        {view === 'catalogue' && (
-          <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
-            {produitsUniques.length > 0 ? produitsUniques.map((p, i) => (
-              <div key={i} className="bg-slate-900/50 border border-slate-800 p-6 rounded-[2rem] hover:border-sky-500/50 transition-all group relative overflow-hidden">
-                <div className="h-12 w-12 bg-slate-800 rounded-xl flex items-center justify-center mb-4 group-hover:bg-sky-500 group-hover:text-slate-950 transition-colors">
-                  <Package size={20} />
-                </div>
-                <h4 className="font-black text-lg text-white mb-2 leading-tight">{p}</h4>
-                <div className="flex justify-between items-end mt-4">
-                  <div>
-                    <p className="text-[10px] font-black text-slate-600 uppercase">Dernier relevé</p>
-                    <p className="text-sky-500 font-bold text-xs">{releves.find(r => r.prodNom === p)?.date || 'N/A'}</p>
-                  </div>
-                  <div className="h-8 w-8 rounded-full border border-slate-800 flex items-center justify-center text-slate-600 hover:text-sky-500 cursor-pointer transition-colors">
-                    <ArrowUpRight size={14} />
-                  </div>
-                </div>
-                <div className="absolute -right-2 -top-2 opacity-5 group-hover:opacity-10 transition-opacity">
-                   <TrendingUp size={100} />
-                </div>
-              </div>
-            )) : (
-              <div className="col-span-full py-20 text-center bg-slate-900/50 border border-dashed border-slate-800 rounded-[3rem]">
-                <Package size={40} className="mx-auto mb-4 text-slate-700" />
-                <p className="text-slate-500 italic">Aucun produit dans le catalogue. Commencez par saisir un relevé.</p>
-              </div>
-            )}
-          </div>
-        )}
-      </main>
-    </div>
-  );
-};
-
-const NavItem = ({ active, icon, label, onClick }) => (
-  <button 
-    onClick={onClick}
-    className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-2xl text-xs font-black uppercase tracking-widest transition-all ${active ? 'bg-sky-500 text-slate-950 shadow-lg shadow-sky-500/10' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}
-  >
-    {icon}
-    <span>{label}</span>
-  </button>
-);
-
-export default App;
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
